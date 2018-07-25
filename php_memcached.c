@@ -3373,49 +3373,74 @@ memcached_return s_server_cursor_version_cb(const memcached_st *ptr, php_memcach
 static
 zend_string *s_decompress_value (const char *payload, size_t payload_len, uint32_t flags)
 {
-	zend_string *buffer;
-
-	uint32_t stored_length;
-	unsigned long length;
-	zend_bool decompress_status = 0;
-	zend_bool is_fastlz = 0, is_zlib = 0;
-
-	if (payload_len < sizeof (uint32_t)) {
-		return NULL;
-	}
-
-	is_fastlz = MEMC_VAL_HAS_FLAG(flags, MEMC_VAL_COMPRESSION_FASTLZ);
-	is_zlib   = MEMC_VAL_HAS_FLAG(flags, MEMC_VAL_COMPRESSION_ZLIB);
-
-	if (!is_fastlz && !is_zlib) {
-		php_error_docref(NULL, E_WARNING, "could not decompress value: unrecognised compression type");
-		return NULL;
-	}
-
-	memcpy(&stored_length, payload, sizeof (uint32_t));
-
-	payload     += sizeof (uint32_t);
-	payload_len -= sizeof (uint32_t);
-
-	buffer = zend_string_alloc (stored_length, 0);
-
-	if (is_fastlz) {
-		decompress_status = ((length = fastlz_decompress(payload, payload_len, &buffer->val, buffer->len)) > 0);
-	}
-	else if (is_zlib) {
-		decompress_status = (uncompress((Bytef *) buffer->val, &buffer->len, (Bytef *)payload, payload_len) == Z_OK);
-	}
-
-	ZSTR_VAL(buffer)[stored_length] = '\0';
-
-	if (!decompress_status) {
-		php_error_docref(NULL, E_WARNING, "could not decompress value");
-		zend_string_release (buffer);
-		return NULL;
-	}
-
-	zend_string_forget_hash_val(buffer);
-	return buffer;
+    zend_string *buffer;
+    
+    uint32_t stored_length;
+    unsigned long length;
+    zend_bool decompress_status = 0;
+    zend_bool is_fastlz = 0, is_zlib = 0;
+    
+    if (payload_len < sizeof (uint32_t)) {
+        return NULL;
+    }
+    
+    is_fastlz = MEMC_VAL_HAS_FLAG(flags, MEMC_VAL_COMPRESSION_FASTLZ);
+    is_zlib   = MEMC_VAL_HAS_FLAG(flags, MEMC_VAL_COMPRESSION_ZLIB);
+    
+    if (!is_fastlz && !is_zlib) {
+        // technically it should be compressed but using the php_memcached 1.0 method
+        /*
+         From gzuncompress().
+         zlib::uncompress() wants to know the output data length
+         if none was given as a parameter
+         we try from input length * 2 up to input length * 2^15
+         doubling it whenever it wasn't big enough
+         that should be eneugh for all real life cases
+        */
+        unsigned int factor = 1, maxfactor = 16;
+        unsigned long length;
+        int status;
+		buffer = zend_string_alloc(payload_len, 0);
+        do {
+            length = (unsigned long)payload_len * (1 << factor++);
+            buffer = zend_string_realloc(buffer, length, 0);
+            status = uncompress((Bytef *) buffer->val, &buffer->len, (Bytef *)payload, payload_len);
+        } while ((status==Z_BUF_ERROR) && (factor < maxfactor));
+    
+        ZSTR_VAL(buffer)[buffer->len] = '\0';
+    
+        if (status != Z_OK) {
+            php_error_docref(NULL, E_WARNING, "could not decompress value");
+            zend_string_release (buffer);
+            return NULL;
+        }
+    } else {
+        memcpy(&stored_length, payload, sizeof (uint32_t));
+        
+        payload     += sizeof (uint32_t);
+        payload_len -= sizeof (uint32_t);
+        
+        buffer = zend_string_alloc (stored_length, 0);
+        
+        if (is_fastlz) {
+          decompress_status = ((length = fastlz_decompress(payload, payload_len, &buffer->val, buffer->len)) > 0);
+        }
+        else if (is_zlib) {
+          decompress_status = (uncompress((Bytef *) buffer->val, &buffer->len, (Bytef *)payload, payload_len) == Z_OK);
+        }
+        
+        ZSTR_VAL(buffer)[stored_length] = '\0';
+        
+        if (!decompress_status) {
+          php_error_docref(NULL, E_WARNING, "could not decompress value");
+          zend_string_release (buffer);
+          return NULL;
+        }
+    }
+    
+    zend_string_forget_hash_val(buffer);
+    return buffer;
+    
 }
 
 static
